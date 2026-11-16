@@ -1,0 +1,30 @@
+{
+  "success_rows": 5,
+  "failed_count": 0,
+  "next_page": 2,
+  "total_pages": 31,
+  "api_total": 3065,
+  "csv": "data/freelaserfile/freelaserfile.csv",
+  "xlsx": "data/freelaserfile/freelaserfile.xlsx",
+  "images": "data/freelaserfile/images",
+  "checkpoint": "data/freelaserfile/checkpoints/state.json",
+  "fields": [
+    "seq",
+    "sourcePageUrl",
+    "detailUrl",
+    "title",
+    "coverUrl",
+    "coverUrlRelative",
+    "imageUrls",
+    "imagePaths",
+    "categories",
+    "tags",
+    "description",
+    "slug",
+    "designId",
+    "entryType",
+    "crawlStatus",
+    "skipReason"
+  ],
+  "upload_base_note": "images from backend uploads CDN; originals often 404 → watermarked/medium"
+}
