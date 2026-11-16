@@ -87,21 +87,32 @@ class AmeedeCrawler:
             self.state.get("images_downloaded"),
         )
 
+    def _processed_path(self) -> Path:
+        return self.config.checkpoint_path.with_name("processed_urls.txt")
+
     def _save_checkpoint(self) -> None:
         path = self.config.checkpoint_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Compact JSON — 25k URL list is large with indent.
-        path.write_text(json.dumps(self.state, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        # Keep state.json small — URL set lives in processed_urls.txt
+        slim = {k: v for k, v in self.state.items() if k != "processed_detail_urls"}
+        slim["processed_count"] = len(self.state.get("processed_detail_urls") or [])
+        path.write_text(json.dumps(slim, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
     def _processed(self) -> set[str]:
-        return set(self.state.get("processed_detail_urls") or [])
+        urls = set(self.state.get("processed_detail_urls") or [])
+        p = self._processed_path()
+        if p.exists():
+            urls.update(line.strip() for line in p.read_text(encoding="utf-8").splitlines() if line.strip())
+        self.state["processed_detail_urls"] = list(urls)
+        return urls
 
     def _mark_processed(self, url: str, processed: set[str]) -> None:
         if url in processed:
             return
         processed.add(url)
-        urls = self.state.setdefault("processed_detail_urls", [])
-        urls.append(url)
+        self.state.setdefault("processed_detail_urls", []).append(url)
+        with self._processed_path().open("a", encoding="utf-8") as f:
+            f.write(url + "\n")
 
     def _record_to_row(self, seq: int, rec: DetailRecord) -> dict:
         return {

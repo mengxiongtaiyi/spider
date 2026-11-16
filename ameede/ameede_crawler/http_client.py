@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import random
+import socket
 import time
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,9 @@ from tenacity import (
 
 logger = logging.getLogger(__name__)
 
+# Hard ceiling for any blocking socket op (httpx timeouts alone have hung on this host).
+socket.setdefaulttimeout(25)
+
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (compatible; AmeedeResearchCrawler/0.1; "
@@ -30,9 +34,8 @@ DEFAULT_HEADERS = {
 
 
 def _timeout(seconds: float) -> httpx.Timeout:
-    # Bound connect separately so a stalled TLS handshake cannot hang forever.
-    connect = min(15.0, max(5.0, seconds / 3))
-    return httpx.Timeout(seconds, connect=connect)
+    connect = min(10.0, max(5.0, seconds / 3))
+    return httpx.Timeout(timeout=seconds, connect=connect, read=seconds, write=seconds, pool=seconds)
 
 
 class PoliteClient:
@@ -54,7 +57,8 @@ class PoliteClient:
             headers=DEFAULT_HEADERS,
             follow_redirects=True,
             timeout=_timeout(self.timeout),
-            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10, keepalive_expiry=15.0),
+            limits=httpx.Limits(max_keepalive_connections=0, max_connections=10, keepalive_expiry=0),
+            http2=False,
         )
 
     def close(self) -> None:
@@ -81,9 +85,11 @@ class PoliteClient:
         self.client = self._new_client()
 
     @retry(
-        retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException, httpx.HTTPStatusError)),
-        wait=wait_exponential_jitter(initial=1, max=20),
-        stop=stop_after_attempt(6),
+        retry=retry_if_exception_type(
+            (httpx.TransportError, httpx.TimeoutException, httpx.HTTPStatusError, TimeoutError, socket.timeout)
+        ),
+        wait=wait_exponential_jitter(initial=1, max=15),
+        stop=stop_after_attempt(5),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
@@ -91,7 +97,7 @@ class PoliteClient:
         self._throttle()
         try:
             resp = self.client.get(url)
-        except (httpx.TransportError, httpx.TimeoutException):
+        except (httpx.TransportError, httpx.TimeoutException, TimeoutError, socket.timeout):
             self._reset_client()
             raise
         if resp.status_code in {429, 500, 502, 503, 504}:
@@ -100,9 +106,11 @@ class PoliteClient:
         return str(resp.url), resp.text
 
     @retry(
-        retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException, httpx.HTTPStatusError)),
-        wait=wait_exponential_jitter(initial=1, max=20),
-        stop=stop_after_attempt(6),
+        retry=retry_if_exception_type(
+            (httpx.TransportError, httpx.TimeoutException, httpx.HTTPStatusError, TimeoutError, socket.timeout)
+        ),
+        wait=wait_exponential_jitter(initial=1, max=15),
+        stop=stop_after_attempt(5),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
@@ -119,6 +127,6 @@ class PoliteClient:
                     for chunk in resp.iter_bytes():
                         f.write(chunk)
                 tmp.replace(dest)
-        except (httpx.TransportError, httpx.TimeoutException):
+        except (httpx.TransportError, httpx.TimeoutException, TimeoutError, socket.timeout):
             self._reset_client()
             raise
