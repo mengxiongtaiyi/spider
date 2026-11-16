@@ -82,8 +82,10 @@ def main(argv: list[str] | None = None) -> int:
                 path.unlink()
         if image_dir.exists():
             for f in image_dir.glob("*"):
-                if f.is_file():
+                if f.is_file() and f.name != ".gitkeep":
                     f.unlink()
+        image_dir.mkdir(parents=True, exist_ok=True)
+        (image_dir / ".gitkeep").touch(exist_ok=True)
 
     config = CrawlConfig(
         category_url=args.category_url,

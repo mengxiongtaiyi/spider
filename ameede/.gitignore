@@ -8,3 +8,4 @@ data/ameede/checkpoints/
 data/ameede/images/*
 !data/ameede/images/.gitkeep
 !data/ameede/sample_images/
+data/ameede/full_crawl.log

@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import logging
 import random
 import time
 from pathlib import Path
 from typing import Any
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -21,21 +29,31 @@ DEFAULT_HEADERS = {
 }
 
 
+def _timeout(seconds: float) -> httpx.Timeout:
+    # Bound connect separately so a stalled TLS handshake cannot hang forever.
+    connect = min(15.0, max(5.0, seconds / 3))
+    return httpx.Timeout(seconds, connect=connect)
+
+
 class PoliteClient:
     def __init__(
         self,
         *,
         min_delay: float = 0.8,
         max_delay: float = 1.6,
-        timeout: float = 45.0,
+        timeout: float = 30.0,
     ) -> None:
         self.min_delay = min_delay
         self.max_delay = max_delay
+        self.timeout = timeout
         self._last_request_at = 0.0
-        self.client = httpx.Client(
+        self.client = self._new_client()
+
+    def _new_client(self) -> httpx.Client:
+        return httpx.Client(
             headers=DEFAULT_HEADERS,
             follow_redirects=True,
-            timeout=timeout,
+            timeout=_timeout(self.timeout),
         )
 
     def close(self) -> None:
@@ -54,15 +72,27 @@ class PoliteClient:
             time.sleep(wait_for)
         self._last_request_at = time.monotonic()
 
+    def _reset_client(self) -> None:
+        try:
+            self.client.close()
+        except Exception:  # noqa: BLE001
+            pass
+        self.client = self._new_client()
+
     @retry(
         retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException, httpx.HTTPStatusError)),
-        wait=wait_exponential_jitter(initial=1, max=30),
-        stop=stop_after_attempt(5),
+        wait=wait_exponential_jitter(initial=1, max=20),
+        stop=stop_after_attempt(6),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
     def get_text(self, url: str) -> tuple[str, str]:
         self._throttle()
-        resp = self.client.get(url)
+        try:
+            resp = self.client.get(url)
+        except (httpx.TransportError, httpx.TimeoutException):
+            self._reset_client()
+            raise
         if resp.status_code in {429, 500, 502, 503, 504}:
             resp.raise_for_status()
         resp.raise_for_status()
@@ -70,19 +100,24 @@ class PoliteClient:
 
     @retry(
         retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException, httpx.HTTPStatusError)),
-        wait=wait_exponential_jitter(initial=1, max=30),
-        stop=stop_after_attempt(5),
+        wait=wait_exponential_jitter(initial=1, max=20),
+        stop=stop_after_attempt(6),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
     def download_file(self, url: str, dest: Path) -> None:
         self._throttle()
         dest.parent.mkdir(parents=True, exist_ok=True)
-        with self.client.stream("GET", url) as resp:
-            if resp.status_code in {429, 500, 502, 503, 504}:
+        try:
+            with self.client.stream("GET", url) as resp:
+                if resp.status_code in {429, 500, 502, 503, 504}:
+                    resp.raise_for_status()
                 resp.raise_for_status()
-            resp.raise_for_status()
-            tmp = dest.with_suffix(dest.suffix + ".part")
-            with tmp.open("wb") as f:
-                for chunk in resp.iter_bytes():
-                    f.write(chunk)
-            tmp.replace(dest)
+                tmp = dest.with_suffix(dest.suffix + ".part")
+                with tmp.open("wb") as f:
+                    for chunk in resp.iter_bytes():
+                        f.write(chunk)
+                tmp.replace(dest)
+        except (httpx.TransportError, httpx.TimeoutException):
+            self._reset_client()
+            raise

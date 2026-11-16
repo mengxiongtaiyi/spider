@@ -152,7 +152,11 @@ class AmeedeCrawler:
         csv_rows = read_csv_rows(self.config.csv_path)
         image_count = 0
         if self.config.image_dir.exists():
-            image_count = sum(1 for p in self.config.image_dir.iterdir() if p.is_file() and not p.name.endswith(".part"))
+            image_count = sum(
+                1
+                for p in self.config.image_dir.iterdir()
+                if p.is_file() and p.name != ".gitkeep" and not p.name.endswith(".part")
+            )
         summary = {
             "listed_count": self.state.get("listed_count"),
             "detail_rows": len(csv_rows),
