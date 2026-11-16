@@ -1,0 +1,40 @@
+{
+  "success_rows": 5,
+  "skipped_count": 0,
+  "failed_count": 0,
+  "duplicate_count": 0,
+  "keyword_found": {
+    "laser cut": 7492
+  },
+  "keyword_index": 1,
+  "page": 1,
+  "csv": "data/instructables/instructables.csv",
+  "xlsx": "data/instructables/instructables.xlsx",
+  "images": "data/instructables/images",
+  "checkpoint": "data/instructables/checkpoints/state.json",
+  "fields": [
+    "seq",
+    "sourcePageUrl",
+    "detailUrl",
+    "title",
+    "author",
+    "categoryPath",
+    "coverUrl",
+    "coverUrlRelative",
+    "imageUrls",
+    "imagePaths",
+    "favoriteCount",
+    "viewCount",
+    "searchKeyword",
+    "searchKeywords",
+    "projectsScope",
+    "entryType",
+    "crawlStatus",
+    "skipReason"
+  ],
+  "projects_scope": "featured",
+  "keywords": [
+    "laser cut",
+    "laser engrave"
+  ]
+}
