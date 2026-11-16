@@ -9,3 +9,6 @@ data/ameede/images/*
 !data/ameede/images/.gitkeep
 !data/ameede/sample_images/
 data/ameede/full_crawl.log
+data/ameede/crawl.pid
+data/ameede/watchdog.log
+data/ameede/full_crawl.log
