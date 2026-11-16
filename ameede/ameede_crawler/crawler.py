@@ -63,7 +63,6 @@ class AmeedeCrawler:
             "next_page": config.start_page,
             "max_page": None,
             "processed_detail_urls": [],
-            "listed_urls": [],
             "listed_count": 0,
             "success_count": 0,
             "skipped_count": 0,
@@ -242,16 +241,15 @@ class AmeedeCrawler:
                     self._save_checkpoint()
                     break
 
-                listed = set(self.state.get("listed_urls") or [])
-                for item in items:
-                    if item.detail_url not in listed:
-                        listed.add(item.detail_url)
-                        self.state.setdefault("listed_urls", []).append(item.detail_url)
-                self.state["listed_count"] = len(listed)
+                # listed_count ≈ unique URLs observed on list pages so far
+                self.state["listed_count"] = max(
+                    int(self.state.get("listed_count") or 0),
+                    len(processed) + sum(1 for it in items if it.detail_url not in processed),
+                )
 
-                page_success: list[dict] = []
-                page_skipped: list[dict] = []
                 page_interrupted = False
+                items_done_on_page = 0
+                items_todo_on_page = sum(1 for it in items if it.detail_url not in processed)
 
                 for item in items:
                     if cfg.max_items is not None and success_rows_added >= cfg.max_items:
@@ -277,9 +275,13 @@ class AmeedeCrawler:
                                 else "ad_or_external_not_source_record"
                             ),
                         )
-                        page_skipped.append(self._record_to_row(seq_skip, rec))
+                        append_csv(cfg.skipped_csv_path, [self._record_to_row(seq_skip, rec)])
                         self.state["skipped_count"] = seq_skip
                         self._mark_processed(item.detail_url, processed)
+                        items_done_on_page += 1
+                        self.state["page_complete"] = False
+                        self.state["next_page"] = page
+                        self._save_checkpoint()
                         continue
 
                     try:
@@ -287,9 +289,13 @@ class AmeedeCrawler:
                         rec = parse_detail_page(detail_html, detail_final, item.source_page_url)
                         if rec.entry_type != "detail":
                             seq_skip = int(self.state.get("skipped_count") or 0) + 1
-                            page_skipped.append(self._record_to_row(seq_skip, rec))
+                            append_csv(cfg.skipped_csv_path, [self._record_to_row(seq_skip, rec)])
                             self.state["skipped_count"] = seq_skip
                             self._mark_processed(item.detail_url, processed)
+                            items_done_on_page += 1
+                            self.state["next_page"] = page
+                            self.state["page_complete"] = False
+                            self._save_checkpoint()
                             continue
 
                         if not rec.cover_url and item.list_image_url:
@@ -302,10 +308,11 @@ class AmeedeCrawler:
                         if wrote:
                             self.state["images_downloaded"] = int(self.state.get("images_downloaded") or 0) + 1
                         seq += 1
-                        page_success.append(self._record_to_row(seq, rec))
+                        append_csv(cfg.csv_path, [self._record_to_row(seq, rec)])
                         success_rows_added += 1
                         self.state["success_count"] = int(self.state.get("success_count") or 0) + 1
                         self._mark_processed(item.detail_url, processed)
+                        items_done_on_page += 1
                         if seq % 25 == 0:
                             logger.info(
                                 "Progress detail=%s images=%s page=%s/%s",
@@ -314,6 +321,7 @@ class AmeedeCrawler:
                                 page,
                                 max_page,
                             )
+                            self._write_progress_summary()
                         else:
                             logger.info("OK [%s] %s", seq, rec.title[:80])
                     except Exception as exc:  # noqa: BLE001
@@ -329,30 +337,34 @@ class AmeedeCrawler:
                             crawl_status="failed",
                             skip_reason=str(exc)[:300],
                         )
-                        page_success.append(self._record_to_row(seq, fail))
+                        append_csv(cfg.csv_path, [self._record_to_row(seq, fail)])
                         self.state["failed_count"] = int(self.state.get("failed_count") or 0) + 1
                         self._mark_processed(item.detail_url, processed)
+                        items_done_on_page += 1
 
-                if page_success:
-                    append_csv(cfg.csv_path, page_success)
-                if page_skipped:
-                    append_csv(cfg.skipped_csv_path, page_skipped)
-
-                if page_interrupted:
-                    # Stay on this page so remaining items are picked up on resume.
+                    # Per-item checkpoint so a hung socket cannot lose a whole page.
                     self.state["page_complete"] = False
                     self.state["next_page"] = page
-                else:
+                    self._save_checkpoint()
+
+                if page_interrupted:
+                    self.state["page_complete"] = False
+                    self.state["next_page"] = page
+                elif items_todo_on_page == 0 or items_done_on_page >= items_todo_on_page:
                     self.state["page_complete"] = True
                     page += 1
                     self.state["next_page"] = page
                     pages_since_xlsx += 1
+                else:
+                    self.state["page_complete"] = False
+                    self.state["next_page"] = page
 
                 self._save_checkpoint()
                 self._write_progress_summary()
 
                 if (
                     not page_interrupted
+                    and self.state.get("page_complete")
                     and cfg.write_xlsx
                     and cfg.xlsx_every_pages > 0
                     and pages_since_xlsx >= cfg.xlsx_every_pages

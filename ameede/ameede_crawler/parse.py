@@ -10,8 +10,8 @@ from bs4 import BeautifulSoup
 
 from .classify import classify_url
 
-# Ameede codes seen in the wild: E0025665, S0000857, L0000435, …
-PROJECT_CODE_RE = re.compile(r"\b([A-Z]\d{6,8})\b", re.I)
+# Ameede codes seen in the wild: E0025665, S0000857, L0000435, AN00071077, …
+PROJECT_CODE_RE = re.compile(r"\b([A-Z]{1,3}\d{5,10})\b", re.I)
 SIZE_SUFFIX_RE = re.compile(r"-\d+x\d+(?=\.(?:webp|jpe?g|png|gif)$)", re.I)
 
 

@@ -41,7 +41,7 @@ class PoliteClient:
         *,
         min_delay: float = 0.8,
         max_delay: float = 1.6,
-        timeout: float = 30.0,
+        timeout: float = 20.0,
     ) -> None:
         self.min_delay = min_delay
         self.max_delay = max_delay
@@ -54,6 +54,7 @@ class PoliteClient:
             headers=DEFAULT_HEADERS,
             follow_redirects=True,
             timeout=_timeout(self.timeout),
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10, keepalive_expiry=15.0),
         )
 
     def close(self) -> None:
