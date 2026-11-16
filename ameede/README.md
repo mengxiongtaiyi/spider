@@ -86,6 +86,21 @@ python crawl_ameede.py --min-delay 1.0 --max-delay 2.0
 
 样例跑数产物已提交在 `data/ameede/`，用于验收字段与双图片路径。
 
+## 全量采集
+
+```bash
+cd ameede
+pip install -r requirements.txt
+# 全新全量（约 1433 页 / ~25k+，断点可续）
+python crawl_ameede.py --fresh --min-delay 0.4 --max-delay 0.9 --xlsx-every-pages 25
+
+# 中断后继续（不要加 --fresh）
+python crawl_ameede.py --min-delay 0.4 --max-delay 0.9 --xlsx-every-pages 25
+```
+
+进度见 `data/ameede/run_summary.json` 与 `data/ameede/checkpoints/state.json`。  
+全量图片体积大，默认不提交 git；样例图在 `data/ameede/sample_images/`，全量图在本机 `data/ameede/images/`。
+
 ## 与 V1.5 Ameede 表的已知差异 / 缺口
 
 1. **图片落盘**：V1.5 原文写「仅提取 URL，无需下载」；**本锁定合同要求必须下载**，故增加 `coverUrlRelative`，并保留 `coverUrl`。

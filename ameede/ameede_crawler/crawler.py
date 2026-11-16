@@ -36,6 +36,7 @@ class CrawlConfig:
     resume: bool = True
     download_images: bool = True
     write_xlsx: bool = True
+    xlsx_every_pages: int = 25
 
 
 def _ext_from_url(url: str, content_type: str | None = None) -> str:
@@ -62,9 +63,13 @@ class AmeedeCrawler:
             "next_page": config.start_page,
             "max_page": None,
             "processed_detail_urls": [],
+            "listed_urls": [],
+            "listed_count": 0,
             "success_count": 0,
             "skipped_count": 0,
             "failed_count": 0,
+            "images_downloaded": 0,
+            "page_complete": True,
         }
         if config.resume:
             self._load_checkpoint()
@@ -75,28 +80,29 @@ class AmeedeCrawler:
             return
         data = json.loads(path.read_text(encoding="utf-8"))
         self.state.update(data)
-        # Keep processed set as list in JSON; convert when using.
         logger.info(
-            "Resumed checkpoint page=%s success=%s skipped=%s",
+            "Resumed checkpoint page=%s success=%s skipped=%s images=%s",
             self.state.get("next_page"),
             self.state.get("success_count"),
             self.state.get("skipped_count"),
+            self.state.get("images_downloaded"),
         )
 
     def _save_checkpoint(self) -> None:
         path = self.config.checkpoint_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Cap processed URL list growth in memory-friendly way for long runs:
-        # keep a set-sized list; for 25k this is fine (~few MB).
-        path.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Compact JSON — 25k URL list is large with indent.
+        path.write_text(json.dumps(self.state, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
     def _processed(self) -> set[str]:
         return set(self.state.get("processed_detail_urls") or [])
 
-    def _mark_processed(self, url: str) -> None:
+    def _mark_processed(self, url: str, processed: set[str]) -> None:
+        if url in processed:
+            return
+        processed.add(url)
         urls = self.state.setdefault("processed_detail_urls", [])
-        if url not in urls:
-            urls.append(url)
+        urls.append(url)
 
     def _record_to_row(self, seq: int, rec: DetailRecord) -> dict:
         return {
@@ -115,18 +121,58 @@ class AmeedeCrawler:
             "skipReason": rec.skip_reason,
         }
 
-    def _download_cover(self, client: PoliteClient, rec: DetailRecord) -> None:
+    def _download_cover(self, client: PoliteClient, rec: DetailRecord) -> bool:
+        """Download cover image; return True if a new file was written."""
         if not self.config.download_images or not rec.cover_url:
-            return
-        name = _safe_name(rec.project_code or slug_from_url(rec.detail_url))
+            return False
+        code = _safe_name(rec.project_code) if rec.project_code else ""
+        slug = _safe_name(slug_from_url(rec.detail_url))
+        # Unique per detail page (code prefix when available for human browsing).
+        name = f"{code}_{slug}" if code else slug
         ext = _ext_from_url(rec.cover_url)
         dest = self.config.image_dir / f"{name}{ext}"
-        # Stable CSV/Excel relative path as required by contract.
         rel = f"data/ameede/images/{name}{ext}"
-
+        wrote = False
         if not dest.exists() or dest.stat().st_size == 0:
             client.download_file(rec.cover_url, dest)
+            wrote = True
         rec.cover_url_relative = rel
+        return wrote
+
+    def _flush_xlsx(self) -> None:
+        if not self.config.write_xlsx:
+            return
+        rows = read_csv_rows(self.config.csv_path)
+        for i, row in enumerate(rows, start=1):
+            row["seq"] = i
+        write_xlsx(self.config.xlsx_path, rows)
+        logger.info("Flushed Excel (%s rows) → %s", len(rows), self.config.xlsx_path)
+
+    def _write_progress_summary(self) -> dict:
+        csv_rows = read_csv_rows(self.config.csv_path)
+        image_count = 0
+        if self.config.image_dir.exists():
+            image_count = sum(1 for p in self.config.image_dir.iterdir() if p.is_file() and not p.name.endswith(".part"))
+        summary = {
+            "listed_count": self.state.get("listed_count"),
+            "detail_rows": len(csv_rows),
+            "success_count": self.state.get("success_count"),
+            "skipped_count": self.state.get("skipped_count"),
+            "failed_count": self.state.get("failed_count"),
+            "images_on_disk": image_count,
+            "images_downloaded": self.state.get("images_downloaded"),
+            "next_page": self.state.get("next_page"),
+            "max_page": self.state.get("max_page"),
+            "page_complete": self.state.get("page_complete"),
+            "csv": str(self.config.csv_path.resolve()),
+            "xlsx": str(self.config.xlsx_path.resolve()) if self.config.write_xlsx else None,
+            "images": str(self.config.image_dir.resolve()),
+            "checkpoint": str(self.config.checkpoint_path.resolve()),
+            "fields": FIELDNAMES,
+        }
+        path = self.config.output_dir / "run_summary.json"
+        path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        return summary
 
     def run(self) -> dict:
         cfg = self.config
@@ -135,20 +181,23 @@ class AmeedeCrawler:
         cfg.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
         processed = self._processed()
-        # Existing CSV rows define next seq and avoid duplicates on resume.
         existing_rows = read_csv_rows(cfg.csv_path)
         for row in existing_rows:
             u = row.get("detailUrl") or ""
             if u:
                 processed.add(u)
+        # Keep checkpoint URL list in sync with CSV on resume.
+        self.state["processed_detail_urls"] = list(processed)
         seq = len(existing_rows)
         success_rows_added = 0
+        pages_since_xlsx = 0
+        stop_requested = False
 
         with PoliteClient(min_delay=cfg.min_delay, max_delay=cfg.max_delay) as client:
             page = int(self.state.get("next_page") or cfg.start_page)
             max_page = self.state.get("max_page")
 
-            while True:
+            while not stop_requested:
                 if cfg.max_pages is not None and (page - cfg.start_page + 1) > cfg.max_pages:
                     logger.info("Stopping: reached --max-pages=%s", cfg.max_pages)
                     break
@@ -166,9 +215,15 @@ class AmeedeCrawler:
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("Failed list page %s: %s", page, exc)
                     self.state["failed_count"] = int(self.state.get("failed_count") or 0) + 1
+                    self.state["page_complete"] = False
+                    self.state["next_page"] = page
                     self._save_checkpoint()
+                    self._write_progress_summary()
+                    # Retry same page next resume; advance once to avoid hard stuck loops
+                    # after repeated failures — leave page as-is for resume.
                     page += 1
                     self.state["next_page"] = page
+                    self._save_checkpoint()
                     continue
 
                 items, detected_max = parse_list_page(html, final_url)
@@ -178,13 +233,26 @@ class AmeedeCrawler:
 
                 if not items:
                     logger.info("No items on page %s; treating as end.", page)
+                    self.state["page_complete"] = True
+                    self.state["next_page"] = page + 1
+                    self._save_checkpoint()
                     break
+
+                listed = set(self.state.get("listed_urls") or [])
+                for item in items:
+                    if item.detail_url not in listed:
+                        listed.add(item.detail_url)
+                        self.state.setdefault("listed_urls", []).append(item.detail_url)
+                self.state["listed_count"] = len(listed)
 
                 page_success: list[dict] = []
                 page_skipped: list[dict] = []
+                page_interrupted = False
 
                 for item in items:
                     if cfg.max_items is not None and success_rows_added >= cfg.max_items:
+                        page_interrupted = True
+                        stop_requested = True
                         break
                     if item.detail_url in processed:
                         continue
@@ -205,11 +273,9 @@ class AmeedeCrawler:
                                 else "ad_or_external_not_source_record"
                             ),
                         )
-                        row = self._record_to_row(seq_skip, rec)
-                        page_skipped.append(row)
+                        page_skipped.append(self._record_to_row(seq_skip, rec))
                         self.state["skipped_count"] = seq_skip
-                        self._mark_processed(item.detail_url)
-                        processed.add(item.detail_url)
+                        self._mark_processed(item.detail_url, processed)
                         continue
 
                     try:
@@ -217,11 +283,9 @@ class AmeedeCrawler:
                         rec = parse_detail_page(detail_html, detail_final, item.source_page_url)
                         if rec.entry_type != "detail":
                             seq_skip = int(self.state.get("skipped_count") or 0) + 1
-                            row = self._record_to_row(seq_skip, rec)
-                            page_skipped.append(row)
+                            page_skipped.append(self._record_to_row(seq_skip, rec))
                             self.state["skipped_count"] = seq_skip
-                            self._mark_processed(item.detail_url)
-                            processed.add(item.detail_url)
+                            self._mark_processed(item.detail_url, processed)
                             continue
 
                         if not rec.cover_url and item.list_image_url:
@@ -230,15 +294,24 @@ class AmeedeCrawler:
                                 rec.crawl_status = "success"
                                 rec.skip_reason = ""
 
-                        self._download_cover(client, rec)
+                        wrote = self._download_cover(client, rec)
+                        if wrote:
+                            self.state["images_downloaded"] = int(self.state.get("images_downloaded") or 0) + 1
                         seq += 1
-                        row = self._record_to_row(seq, rec)
-                        page_success.append(row)
+                        page_success.append(self._record_to_row(seq, rec))
                         success_rows_added += 1
                         self.state["success_count"] = int(self.state.get("success_count") or 0) + 1
-                        self._mark_processed(item.detail_url)
-                        processed.add(item.detail_url)
-                        logger.info("OK [%s] %s", seq, rec.title[:80])
+                        self._mark_processed(item.detail_url, processed)
+                        if seq % 25 == 0:
+                            logger.info(
+                                "Progress detail=%s images=%s page=%s/%s",
+                                seq,
+                                self.state.get("images_downloaded"),
+                                page,
+                                max_page,
+                            )
+                        else:
+                            logger.info("OK [%s] %s", seq, rec.title[:80])
                     except Exception as exc:  # noqa: BLE001
                         logger.exception("Detail failed %s: %s", item.detail_url, exc)
                         seq += 1
@@ -254,40 +327,43 @@ class AmeedeCrawler:
                         )
                         page_success.append(self._record_to_row(seq, fail))
                         self.state["failed_count"] = int(self.state.get("failed_count") or 0) + 1
-                        self._mark_processed(item.detail_url)
-                        processed.add(item.detail_url)
+                        self._mark_processed(item.detail_url, processed)
 
                 if page_success:
                     append_csv(cfg.csv_path, page_success)
                 if page_skipped:
                     append_csv(cfg.skipped_csv_path, page_skipped)
 
-                page += 1
-                self.state["next_page"] = page
-                self.state["processed_detail_urls"] = sorted(processed)
+                if page_interrupted:
+                    # Stay on this page so remaining items are picked up on resume.
+                    self.state["page_complete"] = False
+                    self.state["next_page"] = page
+                else:
+                    self.state["page_complete"] = True
+                    page += 1
+                    self.state["next_page"] = page
+                    pages_since_xlsx += 1
+
                 self._save_checkpoint()
+                self._write_progress_summary()
+
+                if (
+                    not page_interrupted
+                    and cfg.write_xlsx
+                    and cfg.xlsx_every_pages > 0
+                    and pages_since_xlsx >= cfg.xlsx_every_pages
+                ):
+                    self._flush_xlsx()
+                    pages_since_xlsx = 0
 
         # Finalize Excel from full CSV.
         all_rows = read_csv_rows(cfg.csv_path)
-        # Re-number seq for cleanliness
         for i, row in enumerate(all_rows, start=1):
             row["seq"] = i
         write_csv(cfg.csv_path, all_rows)
         if cfg.write_xlsx:
             write_xlsx(cfg.xlsx_path, all_rows)
 
-        summary = {
-            "success_rows": len(all_rows),
-            "skipped_count": self.state.get("skipped_count"),
-            "failed_count": self.state.get("failed_count"),
-            "next_page": self.state.get("next_page"),
-            "max_page": self.state.get("max_page"),
-            "csv": str(cfg.csv_path),
-            "xlsx": str(cfg.xlsx_path) if cfg.write_xlsx else None,
-            "images": str(cfg.image_dir),
-            "checkpoint": str(cfg.checkpoint_path),
-            "fields": FIELDNAMES,
-        }
-        summary_path = cfg.output_dir / "run_summary.json"
-        summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        summary = self._write_progress_summary()
+        summary["fields"] = FIELDNAMES
         return summary

@@ -41,6 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-images", action="store_true", help="Do not download images (debug only)")
     p.add_argument("--no-xlsx", action="store_true", help="Skip Excel export")
     p.add_argument(
+        "--xlsx-every-pages",
+        type=int,
+        default=25,
+        help="Flush Excel every N completed list pages (0=only at end)",
+    )
+    p.add_argument(
         "--sample",
         type=int,
         default=None,
@@ -95,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         resume=not args.no_resume and not fresh,
         download_images=not args.no_images,
         write_xlsx=not args.no_xlsx,
+        xlsx_every_pages=args.xlsx_every_pages,
     )
 
     summary = AmeedeCrawler(config).run()

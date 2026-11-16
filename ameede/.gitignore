@@ -3,4 +3,8 @@ __pycache__/
 *.pyc
 *.part
 data/ameede/checkpoints/
-# Sample CSV/XLSX/images/run_summary.json are intentionally tracked for PR proof.
+
+# Full-run image corpus is too large for git; keep a small sample/ mirror tracked.
+data/ameede/images/*
+!data/ameede/images/.gitkeep
+!data/ameede/sample_images/
