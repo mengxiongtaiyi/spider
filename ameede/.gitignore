@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+*.part
+data/ameede/checkpoints/
+# Sample CSV/XLSX/images/run_summary.json are intentionally tracked for PR proof.
