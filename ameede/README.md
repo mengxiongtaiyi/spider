@@ -53,10 +53,11 @@ python crawl_ameede.py --sample 5 -v
 
 ```bash
 cd ameede
-# 续跑（不要加 --fresh）
-python crawl_ameede.py --min-delay 0.2 --max-delay 0.45 --xlsx-every-pages 50
-# 或带 watchdog
-bash watchdog_only.sh
+# 推荐：监督进程会拉起 watchdog + 每 10 分钟刷 ameede-live（不杀健康 crawl）
+bash ensure_ameede_daemons.sh
+# 或单独：
+# STALE_SECS=75 bash watchdog_only.sh          # 活动文件 >75s 无更新则重启 crawl
+# INTERVAL_SECS=600 bash flush_ameede_live.sh  # 仅刷 Project store，不走 git
 ```
 
 常用参数：

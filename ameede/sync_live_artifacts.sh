@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
-# Checkpoint-safe flush while crawl runs.
-set -eu
+# Periodic git snapshot. Store flush is owned by flush_ameede_live.sh (every 10min).
+# Hard timeouts so git/xlsx cannot freeze this loop for 15–30min.
+set +e
 ROOT="/workspace/ameede"
 REPO="/workspace"
-STORE="/cursor/stores/bc-2e46f76f-8f5e-477a-9c49-8ec40c4d1be3/docs/ameede-live"
 BRANCH="cursor/ameede-laser-crawler-634e"
 LOG="$ROOT/data/ameede/sync_live.log"
 MARKER="$ROOT/data/ameede/last_sync_rows.txt"
-EVERY_ROWS="${EVERY_ROWS:-500}"
 INTERVAL_SECS="${INTERVAL_SECS:-1800}"
 
-mkdir -p "$STORE" "$ROOT/data/ameede"
+mkdir -p "$ROOT/data/ameede"
 touch "$LOG"
 export PYTHONPATH="$ROOT"
 export PYTHONUNBUFFERED=1
 cd "$ROOT"
+printf '%s\n' "$$" >/tmp/ameede_sync.pid
+
+log() {
+  local msg="$(date -Is) $*"
+  timeout 3 bash -c "printf '%s\n' $(printf '%q' "$msg") >>$(printf '%q' "$LOG")" 2>/dev/null || true
+  date -u +%Y-%m-%dT%H:%M:%SZ >/tmp/ameede_sync_heartbeat 2>/dev/null || true
+}
 
 row_count() {
-  python3 - <<'PY'
+  timeout 30 python3 - <<'PY'
 import csv
 from pathlib import Path
 p=Path('/workspace/ameede/data/ameede/ameede.csv')
@@ -28,58 +34,40 @@ PY
 do_sync() {
   local rows
   rows="$(row_count)"
-  echo "$(date -Is) sync start rows=$rows" >>"$LOG"
+  log "sync start rows=$rows"
 
-  cp -f "$ROOT/data/ameede/ameede.csv" /tmp/ameede_snap.csv
+  timeout 30 cp -f "$ROOT/data/ameede/ameede.csv" /tmp/ameede_snap.csv || true
   if [[ -f "$ROOT/data/ameede/run_summary.json" ]]; then
-    cp -f "$ROOT/data/ameede/run_summary.json" /tmp/ameede_snap_summary.json
-  else
-    rm -f /tmp/ameede_snap_summary.json
+    timeout 10 cp -f "$ROOT/data/ameede/run_summary.json" /tmp/ameede_snap_summary.json || true
   fi
 
-  PYTHONPATH="$ROOT" python3 - <<'PY'
+  # XLSX rebuild can be slow; never block forever.
+  timeout 240 env PYTHONPATH="$ROOT" python3 - <<'PY'
 from pathlib import Path
-import csv, json, shutil
-from ameede_crawler.export import write_csv, write_xlsx
-
+import csv
+from ameede_crawler.export import write_xlsx
 rows = list(csv.DictReader(Path('/tmp/ameede_snap.csv').open(encoding='utf-8')))
 for i, r in enumerate(rows, 1):
     r['seq'] = i
 write_xlsx(Path('/workspace/ameede/data/ameede/ameede.xlsx'), rows)
-store = Path('/cursor/stores/bc-2e46f76f-8f5e-477a-9c49-8ec40c4d1be3/docs/ameede-live')
-store.mkdir(parents=True, exist_ok=True)
-write_csv(store / 'ameede.csv', rows)
-if Path('/tmp/ameede_snap_summary.json').exists():
-    shutil.copy2('/tmp/ameede_snap_summary.json', store / 'run_summary.json')
-(store / 'SYNC_META.json').write_text(json.dumps({
-    'synced_rows': len(rows),
-    'note': 'coverUrl URL-only; coverUrlRelative empty for new rows (local fills)',
-}, ensure_ascii=False, indent=2), encoding='utf-8')
 print(len(rows))
 PY
 
   echo "$rows" >"$MARKER"
 
-  cd "$REPO"
-  git add ameede/data/ameede/ameede.csv ameede/data/ameede/ameede.xlsx ameede/data/ameede/run_summary.json || true
-  # refresh csv from live for commit if newer than snap? Prefer live copy into staging
-  # Use current live files (xlsx just rebuilt from snap; csv may have grown — commit live csv)
+  cd "$REPO" || return 0
+  timeout 60 git add ameede/data/ameede/ameede.csv ameede/data/ameede/ameede.xlsx ameede/data/ameede/run_summary.json
   if ! git diff --cached --quiet; then
-    git commit -m "Ameede live progress snapshot (${rows} rows, URL-only coverUrl)" || true
-    git push origin "$BRANCH" || true
-    echo "$(date -Is) pushed rows=$rows" >>"$LOG"
-  else
-    # try add again after copying live csv timestamps
-    git add ameede/data/ameede/ameede.csv ameede/data/ameede/ameede.xlsx ameede/data/ameede/run_summary.json || true
-    if ! git diff --cached --quiet; then
-      git commit -m "Ameede live progress snapshot (${rows} rows, URL-only coverUrl)" || true
-      git push origin "$BRANCH" || true
-      echo "$(date -Is) pushed rows=$rows" >>"$LOG"
+    timeout 60 git commit -m "Ameede live progress snapshot (${rows} rows, URL-only coverUrl)"
+    if timeout 120 git push origin "$BRANCH"; then
+      log "pushed rows=$rows"
     else
-      echo "$(date -Is) no git changes rows=$rows" >>"$LOG"
+      log "push failed/timeout rows=$rows"
     fi
+  else
+    log "no git changes rows=$rows"
   fi
-  cd "$ROOT"
+  cd "$ROOT" || true
 }
 
 do_sync
