@@ -34,7 +34,8 @@ class CrawlConfig:
     max_items: int | None = None
     start_page: int = 1
     resume: bool = True
-    download_images: bool = True
+    # Craftseek Task 2 field 4 confirmed URL-only (no local image download).
+    download_images: bool = False
     write_xlsx: bool = True
     xlsx_every_pages: int = 25
 
@@ -132,7 +133,9 @@ class AmeedeCrawler:
         }
 
     def _download_cover(self, client: PoliteClient, rec: DetailRecord) -> bool:
-        """Download cover image; return True if a new file was written."""
+        """Optionally download cover image; default is URL-only (no download)."""
+        # Always keep coverUrl; leave coverUrlRelative empty unless explicitly downloading.
+        rec.cover_url_relative = rec.cover_url_relative or ""
         if not self.config.download_images or not rec.cover_url:
             return False
         code = _safe_name(rec.project_code) if rec.project_code else ""

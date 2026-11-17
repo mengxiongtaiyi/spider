@@ -14,7 +14,7 @@ from ameede_crawler.crawler import DEFAULT_CATEGORY, AmeedeCrawler, CrawlConfig
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
-            "Crawl Ameede Vector CNC-Laser category: list → detail → local images. "
+            "Crawl Ameede Vector CNC-Laser category: list → detail (coverUrl URL-only). "
             "Ads and /download/ entries are skipped as source records."
         )
     )
@@ -29,21 +29,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--image-dir",
         type=Path,
         default=Path("data/ameede/images"),
-        help="Directory for downloaded images (default: data/ameede/images)",
+        help="Directory for optional image downloads (default off)",
     )
     p.add_argument("--max-pages", type=int, default=None, help="Stop after N list pages")
     p.add_argument("--max-items", type=int, default=None, help="Stop after N detail records")
     p.add_argument("--start-page", type=int, default=1, help="First list page (default 1)")
-    p.add_argument("--min-delay", type=float, default=0.8, help="Min seconds between requests")
-    p.add_argument("--max-delay", type=float, default=1.6, help="Max seconds between requests")
+    p.add_argument("--min-delay", type=float, default=0.25, help="Min seconds between requests")
+    p.add_argument("--max-delay", type=float, default=0.55, help="Max seconds between requests")
     p.add_argument("--no-resume", action="store_true", help="Ignore checkpoint / do not resume")
     p.add_argument("--fresh", action="store_true", help="Delete prior outputs/checkpoint then crawl")
-    p.add_argument("--no-images", action="store_true", help="Do not download images (debug only)")
+    p.add_argument(
+        "--download-images",
+        action="store_true",
+        help="Opt-in: also download cover images (Craftseek field 4 is URL-only by default)",
+    )
+    p.add_argument(
+        "--no-images",
+        action="store_true",
+        help="Deprecated alias: images are already off by default",
+    )
     p.add_argument("--no-xlsx", action="store_true", help="Skip Excel export")
     p.add_argument(
         "--xlsx-every-pages",
         type=int,
-        default=25,
+        default=50,
         help="Flush Excel every N completed list pages (0=only at end)",
     )
     p.add_argument(
@@ -101,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
         max_items=max_items,
         start_page=args.start_page,
         resume=not args.no_resume and not fresh,
-        download_images=not args.no_images,
+        download_images=bool(args.download_images),
         write_xlsx=not args.no_xlsx,
         xlsx_every_pages=args.xlsx_every_pages,
     )

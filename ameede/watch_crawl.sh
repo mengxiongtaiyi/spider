@@ -24,7 +24,7 @@ start_crawl() {
   pkill -9 -f 'crawl_ameede.py' 2>/dev/null || true
   echo "$(date -Is) starting crawl" | tee -a "$LOG" >>"$WATCHLOG"
   # Launch via setsid so watchdog is not the parent
-  setsid nohup python3 crawl_ameede.py --min-delay 0.35 --max-delay 0.75 --xlsx-every-pages 20 \
+  setsid   nohup python3 crawl_ameede.py --min-delay 0.2 --max-delay 0.45 --xlsx-every-pages 50 \
     >>"$LOG" 2>&1 < /dev/null &
   echo $! >"$PIDFILE"
   echo "$(date -Is) crawl pid=$(cat "$PIDFILE")" >>"$WATCHLOG"
