@@ -5,7 +5,7 @@ PIDFILE=data/ameede/crawl.pid
 WATCHLOG=data/ameede/watchdog.log
 LOG=data/ameede/full_crawl.log
 STALE_SECS=${STALE_SECS:-90}
-CRAWL_CMD=(python3 crawl_ameede.py --min-delay 0.2 --max-delay 0.45 --xlsx-every-pages 50)
+CRAWL_CMD=(python3 crawl_ameede.py --min-delay 0.12 --max-delay 0.28 --xlsx-every-pages 50)
 touch "$WATCHLOG"
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$(pwd)"
