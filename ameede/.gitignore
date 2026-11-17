@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+*.part
+data/ameede/checkpoints/
+
+# Full-run image corpus is too large for git; keep a small sample/ mirror tracked.
+data/ameede/images/*
+!data/ameede/images/.gitkeep
+!data/ameede/sample_images/
+data/ameede/full_crawl.log
+data/ameede/crawl.pid
+data/ameede/watchdog.log
+data/ameede/full_crawl.log
