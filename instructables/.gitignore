@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.part
+data/instructables/checkpoints/
+data/instructables/PROGRESS.json
+data/instructables/CRAWL_COMPLETE.json
+data/instructables/IMAGE_BACKFILL_PROGRESS.json
+data/instructables/.write.lock
+data/instructables/images/
+data/instructables/instructables.csv
+data/instructables/instructables.xlsx
+data/instructables/instructables_skipped.csv
+data/instructables/run_summary.json
+# Full crawl + images live in Project store docs/instructables-live/.
+# Keep a small sample under data/instructables/sample/ if needed for PR proof.
