@@ -145,15 +145,25 @@ class InstructablesCrawler:
         if not cfg.snapshot_dir:
             return
         snap = cfg.snapshot_dir
-        snap.mkdir(parents=True, exist_ok=True)
-        for name in ("instructables.csv", "instructables_skipped.csv", "PROGRESS.json"):
-            src = cfg.output_dir / name
-            if src.exists():
-                shutil.copy2(src, snap / name)
-        if cfg.write_xlsx and cfg.xlsx_path.exists():
-            shutil.copy2(cfg.xlsx_path, snap / "instructables.xlsx")
-        # Mirror local image tree (covers/ + avatars/).
-        if cfg.image_dir.exists():
+        try:
+            snap.mkdir(parents=True, exist_ok=True)
+            for name in ("instructables.csv", "instructables_skipped.csv", "PROGRESS.json"):
+                src = cfg.output_dir / name
+                if src.exists():
+                    shutil.copy2(src, snap / name)
+            if cfg.write_xlsx and cfg.xlsx_path.exists():
+                shutil.copy2(cfg.xlsx_path, snap / "instructables.xlsx")
+            (snap / "PROGRESS.json").write_text(
+                json.dumps(progress, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.warning("Snapshot metadata sync failed (non-fatal): %s", exc)
+            return
+
+        # Best-effort image mirror — store I/O errors must not abort the crawl.
+        if not cfg.image_dir.exists():
+            return
+        try:
             for sub in ("covers", "avatars"):
                 src_dir = cfg.image_dir / sub
                 if not src_dir.exists():
@@ -161,13 +171,16 @@ class InstructablesCrawler:
                 dest_dir = snap / "images" / sub
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 for f in src_dir.iterdir():
-                    if f.is_file() and not f.name.endswith(".part"):
-                        target = dest_dir / f.name
+                    if not f.is_file() or f.name.endswith(".part"):
+                        continue
+                    target = dest_dir / f.name
+                    try:
                         if not target.exists() or target.stat().st_size != f.stat().st_size:
                             shutil.copy2(f, target)
-        (snap / "PROGRESS.json").write_text(
-            json.dumps(progress, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+                    except OSError as exc:
+                        logger.warning("Snapshot image copy failed %s: %s", f.name, exc)
+        except OSError as exc:
+            logger.warning("Snapshot image sync failed (non-fatal): %s", exc)
 
     def _record_to_row(self, seq: int, rec: DetailRecord) -> dict:
         return {
