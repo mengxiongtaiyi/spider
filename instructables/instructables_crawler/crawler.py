@@ -346,7 +346,7 @@ class InstructablesCrawler:
                             success_added += 1
                             self.state["success_count"] = int(self.state.get("success_count") or 0) + 1
                             processed.add(hit.detail_url)
-                            logger.info("OK [%s] %s", seq, rec.title[:80])
+                            logger.info("OK [%s] %s", seq, (rec.title[:80]).encode("ascii", "replace").decode("ascii"))
                         except Exception as exc:  # noqa: BLE001
                             logger.exception("Detail failed %s: %s", hit.detail_url, exc)
                             seq += 1
