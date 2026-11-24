@@ -13,8 +13,16 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .detail import DetailRecord, fetch_detail
-from .export import FIELDNAMES, append_csv, read_csv_rows, write_csv, write_xlsx
+from .export import (
+    FIELDNAMES,
+    append_csv,
+    ensure_csv_schema,
+    read_csv_rows,
+    write_csv,
+    write_xlsx,
+)
 from .http_client import PoliteClient
+from .lockutil import file_lock
 from .search import TypesenseSearch
 
 logger = logging.getLogger(__name__)
@@ -40,7 +48,7 @@ class CrawlConfig:
     max_pages_per_keyword: int | None = None
     max_images_per_item: int | None = None
     resume: bool = True
-    download_images: bool = False  # Ameede hybrid: URLs in CSV; download later if needed
+    download_images: bool = True  # cover + author avatar to disk (Craftseek contract)
     write_xlsx: bool = True
     snapshot_every_pages: int = 5  # rewrite xlsx + mirror every N pages
 
@@ -127,11 +135,12 @@ class InstructablesCrawler:
         progress_path.write_text(json.dumps(progress, ensure_ascii=False, indent=2), encoding="utf-8")
 
         if rewrite_xlsx and cfg.write_xlsx and cfg.csv_path.exists():
-            rows = read_csv_rows(cfg.csv_path)
-            for i, row in enumerate(rows, start=1):
-                row["seq"] = i
-            write_csv(cfg.csv_path, rows)
-            write_xlsx(cfg.xlsx_path, rows)
+            with file_lock(cfg.output_dir / ".write.lock"):
+                rows = read_csv_rows(cfg.csv_path)
+                for i, row in enumerate(rows, start=1):
+                    row["seq"] = i
+                write_csv(cfg.csv_path, rows)
+                write_xlsx(cfg.xlsx_path, rows)
 
         if not cfg.snapshot_dir:
             return
@@ -143,6 +152,19 @@ class InstructablesCrawler:
                 shutil.copy2(src, snap / name)
         if cfg.write_xlsx and cfg.xlsx_path.exists():
             shutil.copy2(cfg.xlsx_path, snap / "instructables.xlsx")
+        # Mirror local image tree (covers/ + avatars/).
+        if cfg.image_dir.exists():
+            for sub in ("covers", "avatars"):
+                src_dir = cfg.image_dir / sub
+                if not src_dir.exists():
+                    continue
+                dest_dir = snap / "images" / sub
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                for f in src_dir.iterdir():
+                    if f.is_file() and not f.name.endswith(".part"):
+                        target = dest_dir / f.name
+                        if not target.exists() or target.stat().st_size != f.stat().st_size:
+                            shutil.copy2(f, target)
         (snap / "PROGRESS.json").write_text(
             json.dumps(progress, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -154,9 +176,11 @@ class InstructablesCrawler:
             "detailUrl": rec.detail_url,
             "title": rec.title,
             "author": rec.author,
+            "authorAvatar": rec.author_avatar,
             "categoryPath": rec.category_path,
             "coverUrl": rec.cover_url,
             "coverUrlRelative": rec.cover_url_relative,
+            "authorAvatarRelative": rec.author_avatar_relative,
             "imageUrls": rec.image_urls,
             "imagePaths": rec.image_paths,
             "favoriteCount": rec.favorite_count,
@@ -169,42 +193,86 @@ class InstructablesCrawler:
             "skipReason": rec.skip_reason,
         }
 
+    def _save_one_image(
+        self,
+        client: PoliteClient,
+        *,
+        url: str,
+        dest: Path,
+        relative: str,
+    ) -> str:
+        if not url:
+            return ""
+        if not dest.exists() or dest.stat().st_size == 0:
+            try:
+                client.download_file(url, dest)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Image download failed %s: %s", url, exc)
+                return ""
+        return relative
+
     def _download_images(self, client: PoliteClient, rec: DetailRecord, slug: str) -> None:
+        """Persist cover + author avatar; keep gallery as imageUrls only."""
         if not self.config.download_images:
             return
-        urls = [u for u in (rec.image_urls or "").split("|") if u]
-        if not urls and rec.cover_url:
-            urls = [rec.cover_url]
-        if self.config.max_images_per_item is not None:
-            urls = urls[: self.config.max_images_per_item]
+        safe = _safe_name(slug)
+        covers_dir = self.config.image_dir / "covers"
+        avatars_dir = self.config.image_dir / "avatars"
+        covers_dir.mkdir(parents=True, exist_ok=True)
+        avatars_dir.mkdir(parents=True, exist_ok=True)
 
-        paths: list[str] = []
-        cover_rel = ""
-        for idx, url in enumerate(urls):
-            ext = _ext_from_url(url)
-            name = f"{_safe_name(slug)}_{idx:02d}{ext}"
-            dest = self.config.image_dir / name
-            rel = f"data/instructables/images/{name}"
-            if not dest.exists() or dest.stat().st_size == 0:
-                try:
-                    client.download_file(url, dest)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Image download failed %s: %s", url, exc)
-                    continue
-            paths.append(rel)
-            if idx == 0 or url == rec.cover_url:
-                cover_rel = cover_rel or rel
+        cover_url = rec.cover_url or ""
+        if cover_url:
+            ext = _ext_from_url(cover_url)
+            name = f"{safe}{ext}"
+            dest = covers_dir / name
+            rel = f"images/covers/{name}"
+            rec.cover_url_relative = self._save_one_image(
+                client, url=cover_url, dest=dest, relative=rel
+            )
 
-        if not cover_rel and paths:
-            cover_rel = paths[0]
-        rec.cover_url_relative = cover_rel
-        rec.image_paths = "|".join(paths)
+        avatar_url = rec.author_avatar or ""
+        if avatar_url:
+            ext = _ext_from_url(avatar_url)
+            # Prefer author slug for avatar reuse across projects.
+            avatar_key = _safe_name(rec.author) or safe
+            name = f"{avatar_key}{ext}"
+            dest = avatars_dir / name
+            rel = f"images/avatars/{name}"
+            rec.author_avatar_relative = self._save_one_image(
+                client, url=avatar_url, dest=dest, relative=rel
+            )
+
+        # Optional: also download extra gallery images when capped/requested.
+        if self.config.max_images_per_item is not None and self.config.max_images_per_item > 1:
+            urls = [u for u in (rec.image_urls or "").split("|") if u and u != cover_url]
+            extra = urls[: max(0, self.config.max_images_per_item - 1)]
+            paths: list[str] = []
+            if rec.cover_url_relative:
+                paths.append(rec.cover_url_relative)
+            for idx, url in enumerate(extra, start=1):
+                ext = _ext_from_url(url)
+                name = f"{safe}_{idx:02d}{ext}"
+                dest = covers_dir / name
+                rel = f"images/covers/{name}"
+                got = self._save_one_image(client, url=url, dest=dest, relative=rel)
+                if got:
+                    paths.append(got)
+            rec.image_paths = "|".join(paths)
+        elif rec.cover_url_relative:
+            rec.image_paths = rec.cover_url_relative
 
     def run(self) -> dict:
         cfg = self.config
         cfg.output_dir.mkdir(parents=True, exist_ok=True)
         cfg.image_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.image_dir / "covers").mkdir(parents=True, exist_ok=True)
+        (cfg.image_dir / "avatars").mkdir(parents=True, exist_ok=True)
         cfg.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Upgrade mid-run CSVs that predate authorAvatar columns.
+        ensure_csv_schema(cfg.csv_path)
+        ensure_csv_schema(cfg.skipped_csv_path)
 
         processed = set(self.state.get("processed_detail_urls") or [])
         existing_rows = read_csv_rows(cfg.csv_path)
@@ -301,10 +369,12 @@ class InstructablesCrawler:
                             self.state["failed_count"] = int(self.state.get("failed_count") or 0) + 1
                             processed.add(hit.detail_url)
 
-                    if page_success:
-                        append_csv(cfg.csv_path, page_success)
-                    if page_skipped:
-                        append_csv(cfg.skipped_csv_path, page_skipped)
+                    lock = cfg.output_dir / ".write.lock"
+                    with file_lock(lock):
+                        if page_success:
+                            append_csv(cfg.csv_path, page_success)
+                        if page_skipped:
+                            append_csv(cfg.skipped_csv_path, page_skipped)
 
                     page += 1
                     self.state["page"] = page
@@ -339,12 +409,13 @@ class InstructablesCrawler:
                 if cfg.max_items is not None and success_added >= cfg.max_items:
                     break
 
-        all_rows = read_csv_rows(cfg.csv_path)
-        for i, row in enumerate(all_rows, start=1):
-            row["seq"] = i
-        write_csv(cfg.csv_path, all_rows)
-        if cfg.write_xlsx:
-            write_xlsx(cfg.xlsx_path, all_rows)
+        with file_lock(cfg.output_dir / ".write.lock"):
+            all_rows = read_csv_rows(cfg.csv_path)
+            for i, row in enumerate(all_rows, start=1):
+                row["seq"] = i
+            write_csv(cfg.csv_path, all_rows)
+            if cfg.write_xlsx:
+                write_xlsx(cfg.xlsx_path, all_rows)
 
         summary = {
             "success_rows": len(all_rows),

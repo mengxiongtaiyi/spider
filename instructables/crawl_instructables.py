@@ -15,7 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
             "Crawl Instructables projects for 'laser cut' and 'laser engrave', "
-            "dedupe by detail URL, export CSV/Excel (image URLs by default)."
+            "dedupe by detail URL, download cover + author avatar, export CSV/Excel."
         )
     )
     p.add_argument(
@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--snapshot-dir",
         type=Path,
         default=None,
-        help="Optional live delivery dir; receives progress CSV/xlsx snapshots",
+        help="Optional live delivery dir; receives progress CSV/xlsx/images snapshots",
     )
     p.add_argument("--max-items", type=int, default=None)
     p.add_argument("--max-pages-per-keyword", type=int, default=None)
@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-images-per-item",
         type=int,
         default=None,
-        help="Cap downloaded images per project (cover first). Default: all",
+        help="If set >1, also download extra gallery images beyond cover",
     )
     p.add_argument("--per-page", type=int, default=60)
     p.add_argument("--min-delay", type=float, default=0.6)
@@ -52,21 +52,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-resume", action="store_true")
     p.add_argument("--fresh", action="store_true")
     p.add_argument(
-        "--download-images",
-        action="store_true",
-        help="Also download images locally (default: URL fields only, Ameede hybrid)",
-    )
-    p.add_argument(
         "--no-images",
         action="store_true",
-        help="Deprecated alias: image download is already off by default",
+        help="Skip cover/avatar download (metadata + URLs only)",
+    )
+    p.add_argument(
+        "--download-images",
+        action="store_true",
+        help="Deprecated alias: cover+avatar download is already on by default",
     )
     p.add_argument("--no-xlsx", action="store_true")
     p.add_argument(
         "--sample",
         type=int,
         default=None,
-        help="Convenience: crawl N items, fresh run; with --download-images caps at 3",
+        help="Convenience: crawl N items, fresh run",
     )
     p.add_argument("-v", "--verbose", action="store_true")
     return p
@@ -89,12 +89,10 @@ def main(argv: list[str] | None = None) -> int:
     max_items = args.max_items
     max_images = args.max_images_per_item
     fresh = args.fresh
-    download_images = bool(args.download_images) and not args.no_images
+    download_images = not args.no_images
     if args.sample is not None:
         max_items = args.sample
         fresh = True
-        if download_images and max_images is None:
-            max_images = 3
 
     if fresh:
         for path in [
@@ -109,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
             if path.exists():
                 path.unlink()
         if image_dir.exists():
-            for f in image_dir.glob("*"):
+            for f in image_dir.rglob("*"):
                 if f.is_file():
                     f.unlink()
 

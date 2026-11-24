@@ -31,6 +31,8 @@ class DetailRecord:
     category_path: str
     cover_url: str
     cover_url_relative: str = ""
+    author_avatar: str = ""
+    author_avatar_relative: str = ""
     image_urls: str = ""
     image_paths: str = ""
     favorite_count: str = ""
@@ -168,7 +170,15 @@ def fetch_detail(client: PoliteClient, hit: SearchHit) -> DetailRecord:
             projects_scope=hit.projects_scope,
         )
 
-    author = ((payload.get("author") or {}).get("screenName") or hit.author or "").strip()
+    author_obj = payload.get("author") or {}
+    if not isinstance(author_obj, dict):
+        author_obj = {}
+    author = (author_obj.get("screenName") or hit.author or "").strip()
+    # Instructables author avatar is author.downloadUrl (same CDN as covers).
+    author_avatar = (author_obj.get("downloadUrl") or "").strip()
+    if author_avatar and is_ad_image_url(author_avatar):
+        author_avatar = ""
+
     title = (payload.get("title") or hit.title or "").strip()
     category_path = category_path_from_classifications(payload.get("classifications"))
     if not category_path and hit.primary_classification:
@@ -199,6 +209,7 @@ def fetch_detail(client: PoliteClient, hit: SearchHit) -> DetailRecord:
         author=author,
         category_path=category_path,
         cover_url=cover_url,
+        author_avatar=author_avatar,
         image_urls="|".join(image_urls),
         favorite_count="" if favorites is None else str(favorites),
         view_count="" if views is None else str(views),

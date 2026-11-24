@@ -8,16 +8,18 @@ from typing import Iterable
 
 from openpyxl import Workbook
 
-# V1.5 Instructables fields + contract dual image paths + light ops columns.
+# Craftseek / prior-site aligned: cover + author avatar URLs and relative paths.
 FIELDNAMES = [
     "seq",
     "sourcePageUrl",
     "detailUrl",
     "title",
     "author",
+    "authorAvatar",
     "categoryPath",
     "coverUrl",
     "coverUrlRelative",
+    "authorAvatarRelative",
     "imageUrls",
     "imagePaths",
     "favoriteCount",
@@ -67,3 +69,17 @@ def read_csv_rows(path: Path) -> list[dict]:
         return []
     with path.open("r", encoding="utf-8", newline="") as f:
         return list(csv.DictReader(f))
+
+
+def ensure_csv_schema(path: Path) -> int:
+    """Rewrite CSV if headers are missing new columns. Returns row count."""
+    if not path.exists():
+        return 0
+    with path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        existing = list(reader.fieldnames or [])
+        rows = list(reader)
+    if existing == FIELDNAMES:
+        return len(rows)
+    write_csv(path, rows)
+    return len(rows)
