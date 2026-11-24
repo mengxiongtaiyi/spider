@@ -4,7 +4,7 @@
   "failed_count": 0,
   "duplicate_count": 0,
   "keyword_found": {
-    "laser cut": 7492
+    "laser cut": 7493
   },
   "keyword_index": 1,
   "page": 1,
@@ -36,5 +36,8 @@
   "keywords": [
     "laser cut",
     "laser engrave"
-  ]
+  ],
+  "download_images": false,
+  "complete": true,
+  "updated_at": "2026-11-24T05:55:03.715696+00:00"
 }

@@ -6,7 +6,9 @@ import json
 import logging
 import mimetypes
 import re
+import shutil
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -26,6 +28,7 @@ class CrawlConfig:
     projects_scope: str = "featured"  # matches V1.5 ~7.5k + ~1.1k
     output_dir: Path = Path("data/instructables")
     image_dir: Path = Path("data/instructables/images")
+    snapshot_dir: Path | None = None  # live delivery mirror (CSV/xlsx/PROGRESS)
     checkpoint_path: Path = Path("data/instructables/checkpoints/state.json")
     csv_path: Path = Path("data/instructables/instructables.csv")
     xlsx_path: Path = Path("data/instructables/instructables.xlsx")
@@ -37,8 +40,9 @@ class CrawlConfig:
     max_pages_per_keyword: int | None = None
     max_images_per_item: int | None = None
     resume: bool = True
-    download_images: bool = True
+    download_images: bool = False  # Ameede hybrid: URLs in CSV; download later if needed
     write_xlsx: bool = True
+    snapshot_every_pages: int = 5  # rewrite xlsx + mirror every N pages
 
 
 def _ext_from_url(url: str) -> str:
@@ -66,6 +70,7 @@ class InstructablesCrawler:
             "skipped_count": 0,
             "failed_count": 0,
             "duplicate_count": 0,
+            "pages_since_snapshot": 0,
         }
         if config.resume:
             self._load_checkpoint()
@@ -86,7 +91,61 @@ class InstructablesCrawler:
     def _save_checkpoint(self) -> None:
         path = self.config.checkpoint_path
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Keep checkpoint lean: processed URLs can be large; still needed for resume.
         path.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _progress_payload(self, *, complete: bool = False) -> dict:
+        cfg = self.config
+        csv_rows = 0
+        if cfg.csv_path.exists():
+            # Fast-ish count without loading whole file into memory twice elsewhere.
+            with cfg.csv_path.open("r", encoding="utf-8") as f:
+                csv_rows = max(0, sum(1 for _ in f) - 1)
+        return {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "complete": complete,
+            "success_count": self.state.get("success_count"),
+            "csv_rows": csv_rows,
+            "skipped_count": self.state.get("skipped_count"),
+            "failed_count": self.state.get("failed_count"),
+            "duplicate_count": self.state.get("duplicate_count"),
+            "keyword_found": self.state.get("keyword_found"),
+            "keyword_index": self.state.get("keyword_index"),
+            "page": self.state.get("page"),
+            "projects_scope": cfg.projects_scope,
+            "keywords": list(cfg.keywords),
+            "download_images": cfg.download_images,
+            "csv": str(cfg.csv_path),
+            "xlsx": str(cfg.xlsx_path) if cfg.write_xlsx else None,
+            "snapshot_dir": str(cfg.snapshot_dir) if cfg.snapshot_dir else None,
+        }
+
+    def _write_progress(self, *, complete: bool = False, rewrite_xlsx: bool = False) -> None:
+        cfg = self.config
+        progress = self._progress_payload(complete=complete)
+        progress_path = cfg.output_dir / "PROGRESS.json"
+        progress_path.write_text(json.dumps(progress, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        if rewrite_xlsx and cfg.write_xlsx and cfg.csv_path.exists():
+            rows = read_csv_rows(cfg.csv_path)
+            for i, row in enumerate(rows, start=1):
+                row["seq"] = i
+            write_csv(cfg.csv_path, rows)
+            write_xlsx(cfg.xlsx_path, rows)
+
+        if not cfg.snapshot_dir:
+            return
+        snap = cfg.snapshot_dir
+        snap.mkdir(parents=True, exist_ok=True)
+        for name in ("instructables.csv", "instructables_skipped.csv", "PROGRESS.json"):
+            src = cfg.output_dir / name
+            if src.exists():
+                shutil.copy2(src, snap / name)
+        if cfg.write_xlsx and cfg.xlsx_path.exists():
+            shutil.copy2(cfg.xlsx_path, snap / "instructables.xlsx")
+        (snap / "PROGRESS.json").write_text(
+            json.dumps(progress, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     def _record_to_row(self, seq: int, rec: DetailRecord) -> dict:
         return {
@@ -251,7 +310,17 @@ class InstructablesCrawler:
                     self.state["page"] = page
                     self.state["keyword_index"] = ki
                     self.state["processed_detail_urls"] = sorted(processed)
+                    pages_since = int(self.state.get("pages_since_snapshot") or 0) + 1
+                    self.state["pages_since_snapshot"] = pages_since
                     self._save_checkpoint()
+
+                    every = max(1, int(cfg.snapshot_every_pages or 5))
+                    if pages_since >= every:
+                        self._write_progress(rewrite_xlsx=True)
+                        self.state["pages_since_snapshot"] = 0
+                        self._save_checkpoint()
+                    else:
+                        self._write_progress(rewrite_xlsx=False)
 
                     # End of results for this keyword.
                     if page > max(1, (result.found + result.per_page - 1) // result.per_page):
@@ -263,7 +332,9 @@ class InstructablesCrawler:
                 self.state["keyword_index"] = ki
                 self.state["page"] = page
                 self.state["processed_detail_urls"] = sorted(processed)
+                self.state["pages_since_snapshot"] = 0
                 self._save_checkpoint()
+                self._write_progress(rewrite_xlsx=True)
 
                 if cfg.max_items is not None and success_added >= cfg.max_items:
                     break
@@ -290,8 +361,22 @@ class InstructablesCrawler:
             "fields": FIELDNAMES,
             "projects_scope": cfg.projects_scope,
             "keywords": list(cfg.keywords),
+            "download_images": cfg.download_images,
+            "complete": True,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         (cfg.output_dir / "run_summary.json").write_text(
             json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        (cfg.output_dir / "CRAWL_COMPLETE.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        self._write_progress(complete=True, rewrite_xlsx=False)
+        if cfg.snapshot_dir:
+            snap = cfg.snapshot_dir
+            snap.mkdir(parents=True, exist_ok=True)
+            for name in ("run_summary.json", "CRAWL_COMPLETE.json"):
+                src = cfg.output_dir / name
+                if src.exists():
+                    shutil.copy2(src, snap / name)
         return summary

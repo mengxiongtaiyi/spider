@@ -3,4 +3,7 @@ __pycache__/
 *.pyc
 *.part
 data/instructables/checkpoints/
-# Sample CSV/XLSX/images/run_summary.json are intentionally tracked for PR proof.
+data/instructables/PROGRESS.json
+data/instructables/CRAWL_COMPLETE.json
+# Sample CSV/XLSX/run_summary.json are intentionally tracked for PR proof (URL-only).
+# Full crawl delivery lives in Project store docs/instructables-live/.
