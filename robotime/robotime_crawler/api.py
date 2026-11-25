@@ -52,16 +52,31 @@ class RobotimeApi:
         return f"{SITE}/products/{handle}"
 
     def enrich_from_html(self, handle: str) -> dict[str, Any]:
-        """Optional HTML enrich: JSON-LD brand/availability, no invented designer."""
+        """Optional HTML enrich: JSON-LD brand/availability, no invented designer.
+
+        Best-effort: Shopify HTML rate limits must not fail the product row —
+        products.json already supplies vendor/price/images/availability.
+        """
         url = self.product_url(handle)
-        resp = self.client.get(url, headers={"Accept": "text/html"})
-        html = resp.text
         out: dict[str, Any] = {
-            "finalUrl": str(resp.url),
+            "finalUrl": url,
             "brand": "",
             "designer": "",
             "availabilitySchema": "",
         }
+        try:
+            # Single attempt (no tenacity) — HTML enrich is optional and Shopify
+            # product pages rate-limit harder than products.json / CDN images.
+            self.client._throttle()
+            resp = self.client.client.get(url, headers={"Accept": "text/html"})
+            if resp.status_code == 429:
+                return out
+            resp.raise_for_status()
+        except Exception:
+            # Keep source URL as actual; continue without JSON-LD extras.
+            return out
+        out["finalUrl"] = str(resp.url)
+        html = resp.text
         soup = BeautifulSoup(html, "lxml")
         for script in soup.select('script[type="application/ld+json"]'):
             raw = script.string or ""
