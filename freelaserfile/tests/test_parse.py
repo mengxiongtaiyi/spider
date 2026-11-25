@@ -32,7 +32,8 @@ def test_excludes_similar_images():
     }
     urls = design_image_urls(api, payload)
     assert len(urls) == 1
-    assert urls[0].endswith("watermarked/main.webp")
+    # Prefer medium over watermarked (CDN originals often 404).
+    assert urls[0].endswith("medium/main.webp")
     assert "side.webp" not in urls[0]
     rec = record_from_payload(api, payload, source_page_url="https://freelaserfile.com/")
     assert "side.webp" not in rec.image_urls

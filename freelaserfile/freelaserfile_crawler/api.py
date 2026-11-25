@@ -93,8 +93,8 @@ class FreeLaserFileApi:
         return urljoin(self.upload_base, relative_or_abs.lstrip("/"))
 
     def best_image_url(self, image: dict[str, Any]) -> str:
-        """Prefer largest publicly available asset (originals often 404)."""
-        for key in ("watermarkedUrl", "mediumUrl", "originalUrl", "thumbUrl"):
+        """Prefer publicly available assets (CDN originals often 404 → medium/watermarked)."""
+        for key in ("mediumUrl", "watermarkedUrl", "originalUrl", "thumbUrl"):
             rel = image.get(key)
             if not rel:
                 continue
@@ -102,9 +102,9 @@ class FreeLaserFileApi:
         return ""
 
     def image_url_fallbacks(self, image: dict[str, Any]) -> list[str]:
-        """Ordered candidates for download retries."""
+        """Ordered candidates for download retries (medium first; originals last-resort)."""
         urls: list[str] = []
-        for key in ("watermarkedUrl", "mediumUrl", "originalUrl", "thumbUrl"):
+        for key in ("mediumUrl", "watermarkedUrl", "thumbUrl", "originalUrl"):
             rel = image.get(key)
             if not rel:
                 continue
