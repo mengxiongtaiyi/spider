@@ -86,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir / "PROGRESS.json",
             output_dir / "CRAWL_COMPLETE.json",
             output_dir / "IMAGE_DOWNLOAD_FAILURES.json",
+            output_dir / "listing_cache.json",
         ]:
             if path.exists():
                 path.unlink()

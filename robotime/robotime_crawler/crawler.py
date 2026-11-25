@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import random
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,7 +16,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .api import RobotimeApi
+from .api import SITE, RobotimeApi
 from .export import FIELDNAMES, append_csv, read_csv_rows, write_csv, write_xlsx
 from .http_client import PoliteClient
 from .parse import ProductRecord, record_from_product
@@ -41,7 +43,8 @@ class CrawlConfig:
     download_images: bool = True
     write_xlsx: bool = True
     enrich_html: bool = True  # resolve final URL + JSON-LD brand/availability
-    snapshot_every_pages: int = 1  # rewrite xlsx + mirror every N pages
+    snapshot_every_pages: int = 1  # rewrite xlsx + mirror every N listing pages
+    snapshot_every_items: int = 25  # also mirror every N newly processed products
     expected_total: int | None = None  # for ETA when Shopify JSON has no total
 
 
@@ -318,6 +321,54 @@ class RobotimeCrawler:
             elif "cover_download_failed" not in rec.skipReason:
                 rec.skipReason = f"{rec.skipReason}; cover_download_failed: {note}"[:300]
 
+    def _listing_cache_path(self) -> Path:
+        return self.config.output_dir / "listing_cache.json"
+
+    def _load_or_fetch_listing(self, api: RobotimeApi) -> list[dict]:
+        """Fetch all collection pages once and cache; avoid re-hitting products.json on resume."""
+        cfg = self.config
+        cache_path = self._listing_cache_path()
+        if cfg.resume and cache_path.exists():
+            try:
+                data = json.loads(cache_path.read_text(encoding="utf-8"))
+                products = data.get("products") or []
+                if products:
+                    logger.info("Loaded listing cache: %s products", len(products))
+                    if cfg.expected_total is None:
+                        self.state["expected_total"] = len(products)
+                    return products
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not load listing_cache.json: %s", exc)
+
+        products: list[dict] = []
+        page = 1
+        while True:
+            if cfg.max_pages is not None and page > cfg.max_pages:
+                break
+            logger.info("Prefetch collection page %s", page)
+            listing = api.list_products(page=page, limit=cfg.page_limit)
+            if not listing.products:
+                break
+            for product in listing.products:
+                # Keep source page URL with each product for export.
+                product = dict(product)
+                product["_collectionSourcePageUrl"] = listing.source_page_url
+                products.append(product)
+            if len(listing.products) < cfg.page_limit:
+                break
+            page += 1
+            # Extra breathing room between listing pages (Shopify rate limit).
+            time.sleep(random.uniform(2.0, 4.0))
+
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps({"products": products, "fetched_at": datetime.now(timezone.utc).isoformat()}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        self.state["expected_total"] = cfg.expected_total or len(products)
+        logger.info("Cached listing: %s products", len(products))
+        return products
+
     def run(self) -> dict:
         cfg = self.config
         cfg.output_dir.mkdir(parents=True, exist_ok=True)
@@ -337,106 +388,91 @@ class RobotimeCrawler:
         started_at = datetime.now(timezone.utc)
         if cfg.expected_total is not None:
             self.state["expected_total"] = cfg.expected_total
+        items_since_snapshot = 0
 
         with PoliteClient(min_delay=cfg.min_delay, max_delay=cfg.max_delay) as client:
+            client.warm_session()
             api = RobotimeApi(client)
             currency = api.refresh_shop_currency()
-            page = int(self.state.get("next_page") or cfg.start_page)
+            products = self._load_or_fetch_listing(api)
+            batch_rows: list[dict] = []
 
-            while True:
-                if cfg.max_pages is not None and (page - cfg.start_page + 1) > cfg.max_pages:
-                    logger.info("Stopping: reached --max-pages")
-                    break
+            for product in products:
                 if cfg.max_items is not None and success_added >= cfg.max_items:
                     logger.info("Stopping: reached --max-items")
                     break
-
-                logger.info("Collection page %s", page)
-                listing = api.list_products(page=page, limit=cfg.page_limit)
-                if not listing.products:
-                    logger.info("Empty page %s; done", page)
-                    break
-
-                page_rows: list[dict] = []
-                for product in listing.products:
-                    if cfg.max_items is not None and success_added >= cfg.max_items:
-                        break
-                    handle = (product.get("handle") or "").strip()
-                    if not handle or handle in processed:
-                        continue
-                    try:
-                        enrich = {}
-                        if cfg.enrich_html:
-                            enrich = api.enrich_from_html(handle)
-                        rec = record_from_product(
-                            product,
-                            collection_source_page_url=listing.source_page_url,
-                            currency=currency,
-                            enrich=enrich,
-                        )
-                        self._download_images(client, rec)
-                        seq += 1
-                        page_rows.append(self._record_to_row(seq, rec))
-                        success_added += 1
-                        self.state["success_count"] = int(self.state.get("success_count") or 0) + 1
-                        processed.add(handle)
-                        title_safe = (rec.title[:80]).encode("ascii", "replace").decode("ascii")
-                        logger.info("OK [%s] %s", seq, title_safe)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.exception("Failed %s: %s", handle, exc)
-                        seq += 1
-                        fail = ProductRecord(
-                            sourceUrl=api.product_url(handle),
-                            actualSourceUrl=api.product_url(handle),
-                            title=product.get("title") or "",
-                            handle=handle,
-                            productId=str(product.get("id") or ""),
-                            crawlStatus="failed",
-                            skipReason=str(exc)[:300],
-                            extra={"collectionSourcePageUrl": listing.source_page_url},
-                        )
-                        page_rows.append(self._record_to_row(seq, fail))
-                        self.state["failed_count"] = int(self.state.get("failed_count") or 0) + 1
-                        processed.add(handle)
-
-                if page_rows:
-                    append_csv(cfg.csv_path, page_rows)
-
-                page += 1
-                self.state["next_page"] = page
-                self.state["processed_handles"] = sorted(processed)
-                pages_since = int(self.state.get("pages_since_snapshot") or 0) + 1
-                self.state["pages_since_snapshot"] = pages_since
-                self._save_checkpoint()
-
-                every = max(1, int(cfg.snapshot_every_pages or 1))
-                if pages_since >= every:
-                    self._write_progress(rewrite_xlsx=True)
-                    self.state["pages_since_snapshot"] = 0
-                    self._save_checkpoint()
-                else:
-                    self._write_progress(rewrite_xlsx=False)
-
-                expected = int(self.state.get("expected_total") or 0) or None
-                done = int(self.state.get("success_count") or 0) + int(self.state.get("failed_count") or 0)
-                elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
-                if expected and done and elapsed > 0:
-                    rate = done / elapsed
-                    remain = max(0, expected - done)
-                    eta_s = remain / rate if rate > 0 else 0
-                    logger.info(
-                        "Progress %s/%s (%.1f%%) rate=%.2f/s ETA~%.0fs cover_ok=%s cover_fail=%s",
-                        done,
-                        expected,
-                        100.0 * done / expected,
-                        rate,
-                        eta_s,
-                        self.state.get("cover_ok"),
-                        self.state.get("cover_fail"),
+                handle = (product.get("handle") or "").strip()
+                if not handle or handle in processed:
+                    continue
+                source_page = product.get("_collectionSourcePageUrl") or f"{SITE}/collections/all"
+                try:
+                    enrich = {}
+                    if cfg.enrich_html:
+                        enrich = api.enrich_from_html(handle)
+                    rec = record_from_product(
+                        product,
+                        collection_source_page_url=source_page,
+                        currency=currency,
+                        enrich=enrich,
                     )
+                    self._download_images(client, rec)
+                    seq += 1
+                    batch_rows.append(self._record_to_row(seq, rec))
+                    success_added += 1
+                    self.state["success_count"] = int(self.state.get("success_count") or 0) + 1
+                    processed.add(handle)
+                    title_safe = (rec.title[:80]).encode("ascii", "replace").decode("ascii")
+                    logger.info("OK [%s] %s", seq, title_safe)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Failed %s: %s", handle, exc)
+                    seq += 1
+                    fail = ProductRecord(
+                        sourceUrl=api.product_url(handle),
+                        actualSourceUrl=api.product_url(handle),
+                        title=product.get("title") or "",
+                        handle=handle,
+                        productId=str(product.get("id") or ""),
+                        crawlStatus="failed",
+                        skipReason=str(exc)[:300],
+                        extra={"collectionSourcePageUrl": source_page},
+                    )
+                    batch_rows.append(self._record_to_row(seq, fail))
+                    self.state["failed_count"] = int(self.state.get("failed_count") or 0) + 1
+                    processed.add(handle)
 
-                if len(listing.products) < cfg.page_limit:
-                    break
+                items_since_snapshot += 1
+                every_items = max(1, int(cfg.snapshot_every_items or 25))
+                if len(batch_rows) >= every_items or items_since_snapshot >= every_items:
+                    append_csv(cfg.csv_path, batch_rows)
+                    batch_rows = []
+                    self.state["processed_handles"] = sorted(processed)
+                    self._save_checkpoint()
+                    self._write_progress(rewrite_xlsx=True)
+                    items_since_snapshot = 0
+
+                    expected = int(self.state.get("expected_total") or 0) or None
+                    done = int(self.state.get("success_count") or 0) + int(self.state.get("failed_count") or 0)
+                    elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
+                    if expected and done and elapsed > 0:
+                        rate = done / elapsed
+                        remain = max(0, expected - done)
+                        eta_s = remain / rate if rate > 0 else 0
+                        logger.info(
+                            "Progress %s/%s (%.1f%%) rate=%.2f/s ETA~%.0fs cover_ok=%s cover_fail=%s",
+                            done,
+                            expected,
+                            100.0 * done / expected,
+                            rate,
+                            eta_s,
+                            self.state.get("cover_ok"),
+                            self.state.get("cover_fail"),
+                        )
+
+            if batch_rows:
+                append_csv(cfg.csv_path, batch_rows)
+                self.state["processed_handles"] = sorted(processed)
+                self._save_checkpoint()
+                self._write_progress(rewrite_xlsx=True)
 
         all_rows = read_csv_rows(cfg.csv_path)
         for i, row in enumerate(all_rows, start=1):

@@ -11,4 +11,5 @@ data/robotime/IMAGE_DOWNLOAD_FAILURES.json
 data/robotime/robotime.csv
 data/robotime/robotime.xlsx
 data/robotime/run_summary.json
+data/robotime/listing_cache.json
 # Keep sample_delivery/ tracked

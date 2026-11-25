@@ -32,11 +32,26 @@ class PoliteClient:
         self.min_delay = min_delay
         self.max_delay = max_delay
         self._last_request_at = 0.0
+        self._consecutive_429 = 0
         self.client = httpx.Client(
             headers=DEFAULT_HEADERS,
             follow_redirects=True,
             timeout=timeout,
         )
+
+    def warm_session(self, url: str = "https://www.robotimeonline.com/") -> None:
+        """Hit the storefront once so Cloudflare/Shopify cookies settle before JSON APIs."""
+        try:
+            self._throttle()
+            resp = self.client.get(
+                url,
+                headers={"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+            )
+            # Do not raise on warm failures; listing may still succeed.
+            if resp.status_code >= 500:
+                time.sleep(2.0)
+        except Exception:
+            pass
 
     def close(self) -> None:
         self.client.close()
@@ -56,8 +71,8 @@ class PoliteClient:
 
     @retry(
         retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException, httpx.HTTPStatusError)),
-        wait=wait_exponential_jitter(initial=2, max=90),
-        stop=stop_after_attempt(8),
+        wait=wait_exponential_jitter(initial=5, max=180),
+        stop=stop_after_attempt(12),
         reraise=True,
     )
     def get(self, url: str, **kwargs: Any) -> httpx.Response:
@@ -66,13 +81,18 @@ class PoliteClient:
         if resp.status_code in {429, 500, 502, 503, 504}:
             # Honor Retry-After when present (Shopify/Cloudflare 429).
             if resp.status_code == 429:
+                self._consecutive_429 += 1
                 ra = resp.headers.get("retry-after")
                 try:
-                    sleep_s = float(ra) if ra else 60.0
+                    base = float(ra) if ra else 60.0
                 except ValueError:
-                    sleep_s = 60.0
-                time.sleep(min(max(sleep_s, 1.0), 120.0))
+                    base = 60.0
+                # Escalate beyond Retry-After on repeated 429s from the same client.
+                sleep_s = base * (1.0 + 0.5 * (self._consecutive_429 - 1)) + random.uniform(2.0, 8.0)
+                sleep_s = min(max(sleep_s, 15.0), 300.0)
+                time.sleep(sleep_s)
             resp.raise_for_status()
+        self._consecutive_429 = 0
         resp.raise_for_status()
         return resp
 
