@@ -56,14 +56,22 @@ class PoliteClient:
 
     @retry(
         retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException, httpx.HTTPStatusError)),
-        wait=wait_exponential_jitter(initial=1, max=30),
-        stop=stop_after_attempt(5),
+        wait=wait_exponential_jitter(initial=2, max=90),
+        stop=stop_after_attempt(8),
         reraise=True,
     )
     def get(self, url: str, **kwargs: Any) -> httpx.Response:
         self._throttle()
         resp = self.client.get(url, **kwargs)
         if resp.status_code in {429, 500, 502, 503, 504}:
+            # Honor Retry-After when present (Shopify/Cloudflare 429).
+            if resp.status_code == 429:
+                ra = resp.headers.get("retry-after")
+                try:
+                    sleep_s = float(ra) if ra else 60.0
+                except ValueError:
+                    sleep_s = 60.0
+                time.sleep(min(max(sleep_s, 1.0), 120.0))
             resp.raise_for_status()
         resp.raise_for_status()
         return resp

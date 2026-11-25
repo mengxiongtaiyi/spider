@@ -15,18 +15,36 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
             "Crawl Robotime Online /collections/all via Shopify JSON. "
-            "One row per product (variants not split). Downloads images locally."
+            "One row per product (variants not split). Downloads cover images locally."
         )
     )
     p.add_argument("--output-dir", type=Path, default=Path("data/robotime"))
     p.add_argument("--image-dir", type=Path, default=Path("data/robotime/images"))
+    p.add_argument(
+        "--snapshot-dir",
+        type=Path,
+        default=None,
+        help="Optional live delivery dir; receives progress CSV/xlsx/images snapshots",
+    )
     p.add_argument("--page-limit", type=int, default=250)
     p.add_argument("--max-items", type=int, default=None)
     p.add_argument("--max-pages", type=int, default=None)
     p.add_argument("--start-page", type=int, default=1)
-    p.add_argument("--max-images-per-item", type=int, default=None)
+    p.add_argument(
+        "--max-images-per-item",
+        type=int,
+        default=None,
+        help="Max local images per product (default 1 = cover only)",
+    )
     p.add_argument("--min-delay", type=float, default=0.35)
     p.add_argument("--max-delay", type=float, default=0.9)
+    p.add_argument("--snapshot-every-pages", type=int, default=1)
+    p.add_argument(
+        "--expected-total",
+        type=int,
+        default=None,
+        help="Expected product count for ETA (Shopify JSON has no total)",
+    )
     p.add_argument("--no-resume", action="store_true")
     p.add_argument("--fresh", action="store_true")
     p.add_argument("--no-images", action="store_true")
@@ -60,17 +78,26 @@ def main(argv: list[str] | None = None) -> int:
             max_images = 3
 
     if fresh:
-        for path in [checkpoint, csv_path, xlsx_path, output_dir / "run_summary.json"]:
+        for path in [
+            checkpoint,
+            csv_path,
+            xlsx_path,
+            output_dir / "run_summary.json",
+            output_dir / "PROGRESS.json",
+            output_dir / "CRAWL_COMPLETE.json",
+            output_dir / "IMAGE_DOWNLOAD_FAILURES.json",
+        ]:
             if path.exists():
                 path.unlink()
         if image_dir.exists():
-            for f in image_dir.glob("*"):
+            for f in image_dir.rglob("*"):
                 if f.is_file():
                     f.unlink()
 
     config = CrawlConfig(
         output_dir=output_dir,
         image_dir=image_dir,
+        snapshot_dir=args.snapshot_dir,
         checkpoint_path=checkpoint,
         csv_path=csv_path,
         xlsx_path=xlsx_path,
@@ -85,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
         download_images=not args.no_images,
         write_xlsx=not args.no_xlsx,
         enrich_html=not args.no_html_enrich,
+        snapshot_every_pages=max(1, args.snapshot_every_pages),
+        expected_total=args.expected_total,
     )
     print(RobotimeCrawler(config).run())
     return 0
