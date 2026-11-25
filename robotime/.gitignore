@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.part
+# Full crawl working tree (live mirror is docs/robotime-live/)
+data/robotime/checkpoints/
+data/robotime/images/
+data/robotime/PROGRESS.json
+data/robotime/CRAWL_COMPLETE.json
+data/robotime/IMAGE_DOWNLOAD_FAILURES.json
+data/robotime/robotime.csv
+data/robotime/robotime.xlsx
+data/robotime/run_summary.json
+data/robotime/listing_cache.json
+logs/
+# Keep sample_delivery/ tracked
