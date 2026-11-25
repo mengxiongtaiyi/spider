@@ -12,4 +12,5 @@ data/robotime/robotime.csv
 data/robotime/robotime.xlsx
 data/robotime/run_summary.json
 data/robotime/listing_cache.json
+logs/
 # Keep sample_delivery/ tracked
