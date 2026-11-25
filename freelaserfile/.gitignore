@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.part
+data/freelaserfile/checkpoints/
+data/freelaserfile/images/
+data/freelaserfile/PROGRESS.json
+data/freelaserfile/CRAWL_COMPLETE.json
+data/freelaserfile/IMAGE_DOWNLOAD_FAILURES.json
+# Keep sample_delivery/ tracked; ignore full-run CSV/xlsx under data/
+data/freelaserfile/freelaserfile.csv
+data/freelaserfile/freelaserfile.xlsx
+data/freelaserfile/run_summary.json
